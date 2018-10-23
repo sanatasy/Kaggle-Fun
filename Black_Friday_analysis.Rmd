@@ -1,0 +1,311 @@
+---
+title: "Black Friday Analysis"
+author: "Sanata Sy-Sahande"
+date: "October 22, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo=TRUE,
+               cache=TRUE, autodep=TRUE, cache.comments=FALSE,
+               message=FALSE, warning=FALSE)
+library(dplyr, quietly=T)
+#import data 
+bf <- read.csv("BlackFriday.csv", stringsAsFactors = F, 
+               header=T)
+```
+
+In this document, I first do some exploratory data analysis on the Black Friday dataset. I then run several prediction models to predict the amount purchased by a customer, and classification models to predict the product category of the purchase. 
+
+## Exploratory analysis 
+
+The dataset includes information on about 5800+ customers, for about 3600+ products. 
+
+```{r}
+length(unique(bf$Product_ID)) #3k+ products 
+length(unique(bf$User_ID)) #6K customers 
+```
+The average purchase is about \$9300, and the variable is normally distributed, with spikes at \$15000 and $20000.  
+
+```{r}
+mean(bf$Purchase)
+hist(bf$Purchase)
+
+```
+
+#Purchases as a function of features 
+The next series of plots show how purchase amounts vary by the other variables in the dataset. 
+
+At first glance age, gender (men), and product category seem to be the best predictors of amount purchased. 
+
+```{r}
+#by age 
+spend.age <- bf %>% group_by(Age) %>%
+              summarise(mean = mean(Purchase))
+
+plot(spend.age$mean, xaxt="n", pch=16, ylim=c(8000, 10000), type='b', 
+     main = "Spending by Age Groups")
+axis(1, 1:7, labels=spend.age$Age)
+#by gender 
+spend.gender <- bf %>% group_by(Gender) %>%
+                    summarise(mean = mean(Purchase))
+barplot(spend.gender$mean, names=spend.gender$Gender, 
+        main = "Spending by Gender")
+#by occupation 
+spend.occ <- bf %>% group_by(Occupation) %>%
+                 summarise(mean = mean(Purchase)) %>% arrange(mean)
+barplot(spend.occ$mean, names=spend.occ$Occupation, 
+        main = "Spending by Occupation (masked)")
+#by marital status 
+spend.mar <- bf %>% group_by(Marital_Status) %>%
+              summarise(mean = mean(Purchase)) %>% arrange(mean)
+barplot(spend.mar$mean, names=spend.mar$Marital_Status, 
+        main = "Spending by Marital Status")
+#by category 
+spend.cat <- bf %>% group_by(Product_Category_1) %>%
+              summarise(mean = mean(Purchase)) %>% arrange(mean)
+barplot(spend.cat$mean, names=spend.cat$Product_Category_1, 
+        main = "Spending by Product Category")
+#by city 
+spend.city <- bf %>% group_by(City_Category) %>%
+                summarise(mean = mean(Purchase)) %>% arrange(mean)
+barplot(spend.city$mean, names=spend.city$City_Category, 
+        main = "Spending by City")
+```
+
+Next, I quickly check which product categories are most popular. Categories 1, 5, and 8 outnumber all other categories. This issue will come up later in the classification models. 
+
+```{r}
+##number of purchases per category 
+n.cat <- bf %>% group_by(Product_Category_1) %>%
+              summarise(n = n()) %>% arrange(n)
+barplot(n.cat$n, names = n.cat$Product_Category_1, 
+        main = "Total Purchases by Product Category")
+```
+
+I then check whether some categories just have more products, which would explain their popularity. Again, I find categories 1, 5, and 8 have the most products. 
+
+```{r}
+##number of products per category 
+n.prod <- bf %>% group_by(Product_Category_1) %>%
+  summarise(nprod = n_distinct(Product_ID)) %>% arrange(nprod)
+barplot(n.prod$nprod, names = n.prod$Product_Category_1, 
+        main = "Total Products by Product Category")
+```
+
+#Data cleaning 
+
+I did some data cleaning to add and edit variables. 
+
+```{r}
+#Data cleaning: product and purchase by customer 
+nprod.cust <- bf %>% group_by(User_ID) %>%
+        summarise(user.nprod = n_distinct(Product_ID))
+hist(nprod.cust$user.nprod)
+summary(nprod.cust$user.nprod)
+
+purch.cust <- bf %>% group_by(User_ID) %>%
+              summarise(totspend = sum(Purchase))
+#add to dataset 
+bf <- left_join(bf, nprod.cust, by="User_ID")
+bf <- left_join(bf, purch.cust, by="User_ID")
+
+
+#Data cleaning: drop variables 
+#Dropping cat2 and cat3 vars to simplify classification 
+bf <- bf %>% select(-Product_Category_2, -Product_Category_3)
+
+#Data cleaning: edit variables 
+bf <- bf %>% mutate(Age = recode(Age, "0-17"=0, 
+                                      "18-25"=1, 
+                                      "26-35"=2, 
+                                      "36-45"=3, 
+                                      "46-50"=4, 
+                                      "51-55"=5, 
+                                      "55+"=6))
+bf <- bf %>% mutate(Stay_In_Current_City_Years = 
+                      recode(Stay_In_Current_City_Years, 
+                              "0"=0, "1"=1, "2"=2, "3"=3, "4+"=4))
+
+#Data cleaning: convert to factors 
+bf$Gender <- as.factor(bf$Gender)
+bf$Occupation <- as.factor(bf$Occupation)
+bf$City_Category <- as.factor(bf$City_Category )
+bf$Product_Category_1 <- as.factor(bf$Product_Category_1)
+
+
+```
+#Regression: Predict Purchase Amount 
+
+I run several models to predict Purchase based on customer features. I first calculate the baseline RMSE with a simple OLS regression. 
+
+```{r}
+#Data prep: make training and validation 
+set.seed(1)
+train = sample(1:nrow(bf), nrow(bf)/2)
+
+#LINEAR REG 
+lm.bf <- lm(Purchase ~ Gender + Age + Occupation +  
+              City_Category + Stay_In_Current_City_Years + 
+              Marital_Status, 
+              data=bf[train, ])
+#predict 
+yhat = predict(lm.bf, newdata=bf[-train, ])
+mse <- mean((bf$Purchase[-train] - yhat)^2) 
+sqrt(mse)  
+
+```
+
+RMSE is equal to `r sqrt(mse)`. This means that an OLS model is expected to predict the target purchase amount by a margin of $`r sqrt(mse)`, equivalent to about half a standard deviation.
+
+**Feature Selection** 
+
+To improve on the OLS model, I do some feature engineering to select the best variables to keep. This is especially useful since the dataset includes two categorical variables with many levels: occupation (21 levels) and product category (18 levels). Together they add almost 40 features to the model. 
+
+I first determine the optimal number of variables to include in the model. I compare full subset selection, forward, and backward selection. I use adjusted R-squared as my evaluation metric. 
+
+Below are the results of the forward selection approach, whichindicates about 10 variables before the improvement in adjusted R-squared from adding additional variables becomes neglible. (Similar results for full and backward selection ommitted.)
+
+
+```{r}
+library(leaps)
+#forward selection 
+regfit.fwd = regsubsets(Purchase ~ Gender + Age + Occupation +           
+                            City_Category + 
+                           Stay_In_Current_City_Years + 
+                           Marital_Status, bf, nvmax=19,
+                        method = "forward")
+reg.summary = summary(regfit.fwd)
+
+plot(reg.summary$adjr2 ,xlab =" Number of Variables ",
+     ylab=" Adjusted RSq",type="l")
+which.max(reg.summary$adjr2)
+fwd.coefs <- coef(regfit.fwd, 10)
+fwd.coefs
+
+
+```
+
+
+```{r}
+#First, create a vector that allocates each observation to one of k = 10 folds
+k=10 
+set.seed(1)
+folds=sample(1:k,nrow(bf),replace =TRUE)
+cv.errors = matrix(NA, k, 15, dimnames=list(NULL, paste(1:15) )) #matrix to store results
+
+#make predict function
+predict.regsubsets = function(object, newdata ,id ,...){
+  form = as.formula(object$call[[2]])
+  mat = model.matrix(form, newdata)
+  coefi = coef(object, id=id)
+  xvars =names (coefi )
+  mat[,xvars ]%*% coefi
+}
+
+#In the jth fold, the elements of folds that equal j 
+#are in the test set, and the remainder are in the training set
+for(j in 1:k){
+  best.fit = regsubsets(Purchase ~ Gender + Age + Occupation +           
+                            City_Category + 
+                           Stay_In_Current_City_Years + 
+                           Marital_Status,
+                          data=bf[folds !=j,],
+                          nvmax =15)
+  for(i in 1:15) {  
+    pred=predict.regsubsets(best.fit, bf[folds==j,], id=i) #make predictions for each model size
+    #compute the test errors on the appropriate subset
+    #store them in cv.errors 
+    cv.errors[j,i]=mean( (bf$Purchase[folds==j]-pred)^2)
+  }
+  #returns a kx15 matrix in cv.errors 
+}
+
+mean.cv.errors = apply(cv.errors ,2, mean) #calculate errors for the j-variable model 
+mean.cv.errors
+par(mfrow =c(1,1))
+plot(mean.cv.errors ,type='b')
+
+```
+
+
+
+```{r}
+
+```
+
+As an alternative, I used cross-validation to determine the optimal number of variables in the model. I did this by performing best subset selection for up to 15 variables, within each of k=10 training sets. The results seem to confirm that 10-15 is the ideal range of variables. I select 12, and obtain the best 12 coefficients from the best subset method on the full sample. 
+
+```{r}
+reg.best = regsubsets(Purchase ~ Gender + Age + Occupation +           
+                            City_Category + 
+                           Stay_In_Current_City_Years + 
+                           Marital_Status, data=bf, nvmax=15)
+coef(reg.best, 12)
+
+lm.fit <- lm(Purchase ~ Gender +
+             (Occupation==1) + (Occupation==7) + 
+             (Occupation==10) + (Occupation==12) + 
+             (Occupation==14) + (Occupation==15) + 
+             (Occupation==17) + (Occupation==19) + 
+             (Occupation==20) + (City_Category=="B") +
+             (City_Category=="C"), data=bf[train, ])
+#predict 
+yhat = predict(lm.fit, newdata=bf[-train, ])
+mse <- mean((bf$Purchase[-train] - yhat)^2) #MSE 
+sqrt(mse) 
+
+
+```
+
+Selecting the best subset did not lead to a noticeable improvement in RMSE, which is now at `r sqrt(mse)`. This suggests that a linear model may not be the best model for the data. I turn to regression trees instead. 
+
+#Regression Trees 
+
+In this section, I compare the performance of random forest with boosting to try to reduce the RMSE. 
+
+```{r}
+library(gbm)
+boost.bf = gbm(Purchase ~ Gender + Age + Occupation + 
+                 City_Category + Stay_In_Current_City_Years + 
+                 Marital_Status, 
+                 data=bf[train, ], 
+                 distribution="gaussian",  #use ="bernoulli" for classification
+                 n.trees=500, 
+                 interaction.depth = 4) #limit depth of trees
+
+
+#partial dependence plots:marginal effect of selected vars
+par(mfrow=c(1,2))
+plot(boost.bf, i="Gender")
+plot(boost.bf, i="City_Category")
+
+#predict purchase on test set 
+yhat.boost=predict(boost.bf, newdata=bf[-train, ], n.trees=500)
+mse <- mean((yhat.boost - bf$Purchase[-train])^2)
+sqrt(mse) #RMSE = 4932 
+
+```
+Again, the boosted trees reduced the RMSE, but not by much. My guess is that individual characteristics of consumers do not do as great a job of explaining the purchase amount as the products themselves. This is confirmed by comparing the R-squared of the original OLS model, and one including the product categories on the right hand side. 
+```{r}
+lm.bf <- lm(Purchase ~ Gender + Age + Occupation +  
+              City_Category + Stay_In_Current_City_Years + 
+              Marital_Status, 
+              data=bf[train, ])
+sum.lm1 <- summary(lm.bf)
+sum.lm1$r.squared
+
+lm.bf <- lm(Purchase ~ Gender + Age + Occupation +  Product_Category_1 + 
+              City_Category + Stay_In_Current_City_Years + 
+              Marital_Status, 
+              data=bf[train, ])
+sum.lm2 <- summary(lm.bf)
+sum.lm2$r.squared
+
+
+
+```
+
+As suspected, including product categories increases the training R-squared from `r round(sum.lm1$r.squared, 2)` to `r round(sum.lm2$r.squared, 2)`. But this is not particularly informative because it simply indicates that customers who by products from more expensive categories spend more money. It seems then that the appropriate model would be to predict *which categories* of goods customers will buy--a classification problem. 
+
+However, before continuing, I make a case for why the prediction models were still informative. Despite their low explanatory power, we now have a better idea of what types of customers tend to spend more: male customers, and those in a set of key occupations (masked). I would expect to see these same features be relevant for the classification models. 
